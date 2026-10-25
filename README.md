@@ -1,7 +1,18 @@
 ## EBS Instance Snapshot
 
 ## Summary:
-When I start working with a new EBS System I in most cases want to gather information about the system really quick so i can  
+When I start working with a new EBS system, I almost always want to gather basic information about it quickly, so I can get an overview of what I'm dealing with before I touch anything: release and patch level, installed products, languages, nodes, database version and the most important configuration details.
+
+Oracle already provides tools for this, such as AD Configuration script ('adutconf.sql'), and many more. These can be used for troubleshooting of simply document the status of the installation. 
+To get a first glance and overview of the installation I seldom need to use the comprehensive scripts from Oracle but feel a need for a more lightweight version.
+
+EBS Instance Snapshot is my own lightweight alternative for that first look:
+
+- Collects what I consider the essential startup information, nothing more.
+- Short, readable output provided as a html report.
+- No downloads from MOS needed, works on any EBS instance where you have APPS access, or better yet, a read only for this purpose.
+
+It is not meant to replace Oracle's tools, but to give a quick and consistent starting point every time I begin working on a new system.
 
 ## Overview
 
@@ -12,11 +23,11 @@ The toolkit includes the below files scripts:
 1. create_instance_snapshot.sh                         # The main shellscript
 2. inc_fech_os_info                                    # Shell script fetching information about the operating system.
 3. inc_fetch_db_info                                   # Shell script
-4. inc_fetch_ebs_info
-5. inc_help
-6. inc_prepare
-7. inc_htmp_report
-8. db_info.sql    # SQL script
+4. inc_help                                            # Shell script containing help functions.
+5. inc_prepare
+6. inc_htmp_report
+7. inc_fetch_ebs_info 
+8. db_info.sql            # SQL script
 9. ebs_info.sql
 
 
