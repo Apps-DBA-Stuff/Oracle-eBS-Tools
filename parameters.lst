@@ -1,0 +1,164 @@
+#+======================================================================================================================================
+#| File Name:
+#| parameters.lst
+#|
+#| Description:
+#| The lists of the eBS Instance Snapshot, one section per list. A section starts with its [NAME] line and ends at the next one.
+#| Lines starting with # and empty lines are skipped. split_parameters() reads the sections at start.
+#|
+#|   [INIT_PARAMETERS]        2.2  Init parameters to list, format name|expected value|note (the expected value isn't shown)
+#|   [PROFILE_OPTIONS]        3.2  Profile options to list, one user or internal name per line
+#|   [CONTEXT_PARAMETERS]     3.7  Context file parameters to list, format oa_var name|expected value|note
+#+======================================================================================================================================
+
+[INIT_PARAMETERS]
+# Database and release, information only
+db_name||
+compatible||
+optimizer_features_enable||
+db_block_size|8192|Mandatory for EBS
+spfile||
+diagnostic_dest||
+
+# Memory, information only
+memory_target||
+sga_target||
+sga_max_size||
+pga_aggregate_target||
+pga_aggregate_limit||
+shared_pool_size||
+shared_pool_reserved_size||
+db_cache_size||
+use_large_pages||HugePages, see section 1
+
+# Processes, sessions and cursors, information only
+processes||
+sessions||
+open_cursors||
+session_cached_cursors||
+db_files||
+
+# Undo, information only
+undo_management||
+undo_tablespace||
+undo_retention||
+
+# Jobs and parallel execution
+job_queue_processes||
+aq_tm_processes||
+parallel_max_servers||
+
+# NLS, mandatory for EBS
+nls_date_format|DD-MON-RR|Mandatory for EBS
+nls_numeric_characters|.,|Mandatory for EBS
+nls_sort|BINARY|Mandatory for EBS
+nls_comp|BINARY|Mandatory for EBS
+nls_length_semantics|BYTE|Mandatory for EBS
+
+# Optimizer and hidden parameters, mandatory for EBS
+cursor_sharing|EXACT|Mandatory for EBS
+optimizer_secure_view_merging|FALSE|Mandatory for EBS
+optimizer_adaptive_statistics|FALSE|12.2 and higher
+optimizer_index_cost_adj||
+optimizer_dynamic_sampling||
+_sort_elimination_cost_ratio|5|Mandatory for EBS
+_like_with_bind_as_equality|TRUE|Mandatory for EBS
+_fast_full_scan_enabled|FALSE|Mandatory for EBS
+_b_tree_bitmap_plans|FALSE|Mandatory for EBS
+_optimizer_autostats_job|FALSE|Mandatory for EBS
+_system_trig_enabled|TRUE|Mandatory for EBS
+
+# Performance Related parameters
+filesystemio_options||
+disk_asynch_io||
+db_writer_processes||
+dbwr_io_slaves||
+db_file_multiblock_read_count||
+db_block_checking||
+db_block_checksum||
+statistics_level||
+control_management_pack_access||
+
+
+# Other
+plsql_code_type||NATIVE recommended
+sec_case_sensitive_logon||
+recyclebin||
+
+[PROFILE_OPTIONS]
+# The Profile Values to List
+FND: Diagnostics||
+FND: Debug Log Enabled||
+FND: Debug Log Level||
+ICX:Session Timeout||
+Sign-On:Audit Level||
+Signon Password Length
+Applications Web Agent||
+Apps Servlet Agent||
+Applications Framework Agent||
+ICX: Forms Launcher||
+RRA: Enabled
+AR: Debug Level for Lockbox and PostBatch||
+AR: Enable SQL trace||
+ICX: Date format mask||
+AuditTrail:Activate||
+AX: Debug Log Mode||
+AX: Debug Mode||
+FII: Debug Mode||
+INV:Debug Level||
+PA: Debug Mode||
+PO:Enable Sql Trace for Receiving Processor||
+PO: Set Debug Concurrent ON||
+PO: Set Debug Workflow ON||
+Signon Password Custom||
+Signon Password No Reuse||
+APPS_BANNER_MESSAGE||
+Flexfields:Use Java Cache||
+Signon Password Failure Limit||
+Applications Proxy Port||
+Socket Listener Port||
+FND: Search Enabling Flag||
+GL: Debug Mode
+Security: Allowed Resources||
+Security: Allowed Resource Authorizations||
+Security: Allowed Forwards||
+Enable Restricted JSP Access||
+Allow Unrestricted JSP Access
+
+[CONTEXT_PARAMETERS]
+# Context file parameters to list, read from $CONTEXT_FILE (application tier, run file system)
+# Format: oa_var name|expected value|note    (empty expected value = information only, no check)
+
+# Context
+s_contextname||
+s_systemname||
+s_file_edition_type|run|
+s_contextfile||
+
+# Database connection
+s_dbSid||
+s_dbhost||
+s_dbport||
+s_tools_twotask||
+s_apps_jdbc_connect_descriptor||
+s_jdbc_connect_descriptor_generation||
+
+# Web entry point
+s_webentryurlprotocol||
+s_webentryhost||
+s_webentrydomain||
+s_active_webport||
+s_login_page||
+s_external_url||
+
+# WebLogic and JVM
+s_wls_adminport||
+s_oacore_jvm_start_options||
+s_forms_jvm_start_options||
+s_fnd_jdbc_buffermin||
+s_fnd_jdbc_buffermax||
+
+# Directories
+s_applcsf||
+s_appltmp||
+s_applptmp||
