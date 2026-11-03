@@ -18,21 +18,17 @@ It is not meant to replace Oracle's tools, but to give a quick and consistent st
 
 Written for Linux (only tested on OEL8)
 
-The toolkit includes the below files scripts:
+The toolkit includes the below files:
 
 1. create_instance_snapshot.sh                         # The main shellscript
-2. inc_fech_os_info                                    # Shell script fetching information about the operating system.
-3. inc_fetch_db_info                                   # Shell script
-4. inc_help                                            # Shell script containing help functions.
-5. inc_prepare
-6. inc_htmp_report
-7. inc_fetch_ebs_info 
-8. db_info.sql            # SQL script
-9. ebs_info.sql
+2. inc_functions                                       # Shell script fetching all needed information
+3. variables                                           # Contains variables 
+4. run_sql.sql                                         # All SQL for the Database and eBS sections 
+5. parameters.lst                                      # A list of parameters to fetch from the system, init parameters, profile options and context parameters to check. Parameters can be added or withdrawn when needed.                          
+   
 
 
-Create a directory and place the files in the repo in the newly created directory. Source the eBS environment.
-1. run create_instance_snapshot.sh
+Create a directory and place the above listed files in the newly created directory. Source the eBS environment and execute create_instance_snapshot.sh
 
 
 ## Installation
@@ -41,9 +37,9 @@ Create a directory and place the files in the repo in the newly created director
 - Place the files in the created directory.
 - Make the scripts executable:
 
-chmod +x pwdgen
-chmod +x change_product_pwds.sh
-chmod +x set_default_product_pwds.sh
+chmod +x create_instance_snapshot.sh
+chmod +x inc_functions
+chmod +x run_sql.sql 
 
 
 ## Usage
@@ -52,30 +48,13 @@ chmod +x set_default_product_pwds.sh
 
 ./create_instance_snapshot.sh
 
-
-### Change All Product Passwords to Random Values
-
--- See to that tbe eBS Environment has been sourced before using.
-./change_product_pwds.sh
-
-This script will:
-- Use `pwdgen` to generate random passwords
-- Apply them to all Oracle EBS product schemas (GL, AR, AP, PO, INV, etc.)
-- Producing a logfile with information.
-
-### Reset All Product Passwords to Defaults
-
--- See to that tbe eBS Environment has been sourced before using.
-./set_default_product_pwds.sh
-
-This script will: 
-- Restore the original default passwords for all product schemas.
+Output : ./ebs_snapshot_$TWO_TASK_<DATE_time>.html
 
 ## Security Notes
 
-- Always store generated passwords securely
-- Consider your organization's password policies before using these scripts
-- Test in a non-production environment first
+- Consider creating a read only apps user and change the script to access the database using that user instead of apps.
+- Verify the scripts and functions before use so they perform what you actually expect.
+- Test in a non-production environment first.
 
 ## License
 
