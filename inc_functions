@@ -1,0 +1,1222 @@
+#!/bin/bash
+#+======================================================================================================================================
+#| File Name:
+#| inc_functions
+#|
+#| Description:
+#| All functions of the eBS Instance Snapshot, read (sourced) by create_instance_snapshot.sh after the variables.
+#|
+#| The file has three parts, each with its own description below:
+#|   COMMON    Environment check, start/end output, SQL execution, housekeeping
+#|   COLLECT   Collects the OS, Database and eBS data into .lookup files
+#|   REPORT    Builds the HTML report from the .lookup files
+#+======================================================================================================================================
+#set -x
+
+#+======================================================================================================================================
+#| Part: COMMON
+#|
+#| Description:
+#| Common functions of the program, everything that isn't collecting data (COLLECT part) or building the report (REPORT part).
+#|
+#| The functions, in the order the program uses them:
+#|   check_environment()      main program, before the APPS password is asked: eBS environment, work directory, sqlplus
+#|   print_program_start()    main program, prints the start banner
+#|   split_parameters()       main program, writes the sections of parameters.lst to the work directory
+#|   run_sql_script()         COLLECT part, runs run_sql.sql as APPS
+#|   check_lookup_file()      COLLECT part, checks the lookup file of one query, a failed query becomes a .err file
+#|   kv_value()               COLLECT part and REPORT part, reads one value from a key|value lookup file
+#|   print_program_end()      main program, prints the report name
+#|   housekeeping()           main program exit trap, removes the APPS credentials and the work directory
+#|
+#| Change History:
+#|
+#| 2026-10-18   0.1     Fredrik Lindkvist                       Creation 
+#| 2026-10-30   0.2     Fredrik Lindkvist						Add check if SQLplus can be found.
+#+======================================================================================================================================
+
+#+--------------------------------------------------------------------
+#| Function: check_environment()
+#| Basic Check Function
+#| Checks that the eBS Environment has been sourced.
+#| Terminates the program if envuronement not sourced.
+#| Also checks needed work directories are in place.
+#| Also checks SQLplus can be found as needed by the tool.
+#+--------------------------------------------------------------------
+function check_environment() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        # ${APPL_TOP:-} is needed, set -u terminates the program on an unset variable before the message is shown.
+        if [ -z "${APPL_TOP:-}" ]; then
+                echo "eBS environment has not been sourced, please source the environment and run the program again : Terminating Program"
+                EXITSTATUS=1
+                return 1
+        fi
+
+        # TMP_DIR is created by mktemp in variables, it is empty if /tmp is full or not writable
+        if [ ! -d "${TMP_DIR}" ]; then
+                echo "Unable to create a work directory in /tmp : Terminating Program"
+                EXITSTATUS=1
+                return 1
+        fi
+
+        # sqlplus comes from the 10.1.2 tools home of the sourced environment
+        if ! command -v sqlplus > /dev/null 2>&1; then
+                echo "sqlplus was not found in PATH : Terminating Program"
+                EXITSTATUS=1
+                return 1
+        fi
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: print_program_start()
+#| Basic Print Output Function
+#| Prints the program name and version when the login succeeded.
+#+--------------------------------------------------------------------
+function print_program_start() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        echo ""
+        echo ""
+        echo "#+========================================================================="
+        echo "#| eBS Instance Snapshot : Version ${PROGRAM_VERSION}"
+        echo "#|"
+        echo "#| Fetches an overview of the eBS instance and creates a HTML report."
+        echo "#+========================================================================="
+        echo ""
+
+}
+
+#+--------------------------------------------------------------------------------------------
+#| Function: run_sql_script()
+#| Execution Function
+#| Runs one static SQL script as APPS, using ${apps_connection_string} validated in the main
+#| program. The work directory ${TMP_DIR} is passed to the script as &1, the script spools
+#| every query to its own lookup file there. 
+#| $1 = SQL script to be executed.
+#+--------------------------------------------------------------------------------------------
+function run_sql_script() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        local sql_file="$1"
+
+        if [ ! -f "${sql_file}" ]; then
+                echo "SQL script ${sql_file} not found : Terminating Program"
+                EXITSTATUS=1
+                return 1
+        fi
+
+        # -S silent, -L only one login attempt (no password prompt if the login fails)
+        sqlplus -S -L "${apps_connection_string}" @${sql_file} ${TMP_DIR} > /dev/null 2>&1
+
+        if [ $? -ne 0 ]; then
+                echo "Warning: SQL script $(basename "${sql_file}") ended with errors"
+                return 1
+        fi
+
+}
+
+#+--------------------------------------------------------------------------------------------
+#| Function: check_lookup_file()
+#| Execution Function
+#| Checks the lookup file of one query after run_sql_script() and prints a warning if the
+#| query failed. A failed query has its ORA- or SP2- error spooled to the lookup file, the
+#| file is then renamed from .lookup to .err so the report shows
+#| "Information not available: ORA-..." instead of the table.
+#| $1 = lookup file
+#+--------------------------------------------------------------------------------------------
+function check_lookup_file() {
+
+        local lookup_file="$1"
+        local error_file="${lookup_file%.lookup}.err"
+
+        # No file at all: the script stopped before this query
+        if [ ! -f "${lookup_file}" ]; then
+                echo "Query wasn't run" > "${error_file}"
+                echo "Warning: No output for $(basename "${lookup_file}")"
+                return 1
+        fi
+
+        # The query failed, i.e ORA-00942 when APPS lacks a grant
+        if grep -q -E '^(ORA|SP2)-[0-9]+' "${lookup_file}"; then
+                mv "${lookup_file}" "${error_file}"
+                echo "Warning: Query for $(basename "${lookup_file}") failed : $(grep -m1 -E '^(ORA|SP2)-[0-9]+' "${error_file}")"
+                return 1
+        fi
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: split_parameters()
+#| Basic Prepare Function
+#| Writes the sections of ${PARAMETERS_FILE} to one list file per section
+#| in the work directory, the functions then read their own list.
+#+--------------------------------------------------------------------
+function split_parameters() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        # $1 = section name, the lines after [name] up to the next [section] line
+        function read_section() {
+                awk -v section="[$1]" '/^\[/ { on = ($0 == section); next } on' "${PARAMETERS_FILE}"
+        }
+
+        read_section INIT_PARAMETERS > "${INIT_PARAMETERS_FILE}"
+        read_section PROFILE_OPTIONS > "${PROFILE_OPTIONS_FILE}"
+        read_section CONTEXT_PARAMETERS > "${CONTEXT_PARAMETERS_FILE}"
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: kv_value()
+#| Basic Help Function
+#| Returns the value for a key in a key|value lookup file, nothing if
+#| the file or the key doesn't exist.
+#| i.e kv_value "${DB_OVERVIEW_LOOKUP_FILE}" "Multitenant"
+#| $1 = lookup file, $2 = key
+#+--------------------------------------------------------------------
+function kv_value() {
+
+        if [ -f "$1" ]; then
+                awk -F'|' -v key="$2" '$1 == key { print $2; exit }' "$1"
+        fi
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: print_program_end()
+#| Basic Print Output Function
+#| Prints where the report was written.
+#+--------------------------------------------------------------------
+function print_program_end() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        echo ""
+        echo "#+=========================================================================="
+        echo "#| Completed eBS Instance Snapshot"
+        echo "#|"
+        echo "#| Report       : ${HTML_FILE}"
+        echo "#+=========================================================================="
+        echo ""
+
+}
+
+#+--------------------------------------------------------------------------------
+#| Function: housekeeping()
+#| Basic Housekeeping Function
+#| Unsets the APPS credentials and removes the work directory ${TMP_DIR}
+#| with the lookup files, the report is the only thing left after a run.
+#| Runs from the exit traps in the main program, so it also runs on Ctrl+C,
+#| a failed login or any other stop.
+#+--------------------------------------------------------------------------------
+function housekeeping() {
+
+        # Run only once, the INT and TERM traps call it and then exit, which fires the EXIT trap again
+        if [ -n "${HOUSEKEEPING_DONE:-}" ]; then
+                return 0
+        fi
+        HOUSEKEEPING_DONE=1
+
+        # Unset login credentials
+        unset apps_connection_string
+
+        # Remove the work directory of this run, only if it is really ours (name and owner)
+        if [[ "${TMP_DIR:-}" == /tmp/ebs_snapshot_* ]] && [ -d "${TMP_DIR}" ] && [ -O "${TMP_DIR}" ]; then
+                rm -rf "${TMP_DIR}"
+        fi
+
+}
+
+#+======================================================================================================================================
+#| Part: COLLECT
+#|
+#| Description:
+#| Collects all data for the report, no HTML is made here. Every query or check writes its result to its own .lookup file
+#| in the work directory ${TMP_DIR} (one row per line, columns separated by |, see variables). REPORT part then turns
+#| the lookup files into the report.
+#|
+#| The main program runs the three fetch functions in this order:
+#|   fetch_db_information()   Runs run_sql.sql in one sqlplus session, checks the Database lookup files (report section 2)
+#|   fetch_ebs_information()  Checks the eBS lookup files written by run_sql.sql (report section 3), reads the context file
+#|   fetch_os_information()   Operating System (report section 1), reads the OS of this node. Runs last, it needs the
+#|                            database host from fetch_db_information() to know if the database runs on this node.
+#|
+#| A failing query is printed as a warning and shown in the report, the other queries still run.
+#| The program stops only if the database version can't be fetched (wrong connection or no access at all).
+#|
+#+======================================================================================================================================
+
+#+======================================================================================================================================
+#| DATABASE, report section 2
+#+======================================================================================================================================
+
+#+--------------------------------------------------------------------
+#| Function: fetch_db_information()
+#| Database Information Collection
+#| Runs run_sql.sql, all queries in one sqlplus session, and
+#| checks the Database lookup files. Stops the program if the database
+#| version can't be fetched. Sets DB_VERSION.
+#+--------------------------------------------------------------------
+function fetch_db_information() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        local lookup_file
+
+        echo ""
+        echo "Collecting Database and eBS Information"
+
+        run_sql_script "${RUN_SQL}"
+
+        # The version is the first query, without it nothing else was fetched either (xargs trims blanks)
+        DB_VERSION=$(cat "${DB_VERSION_LOOKUP_FILE}" 2>/dev/null | xargs)
+
+        if ! [[ "${DB_VERSION}" =~ ^[0-9]+\. ]]; then
+                echo "Unable to fetch the database version : Terminating Program"
+                EXITSTATUS=1
+                return 1
+        fi
+
+        # Database lookup files written by run_sql.sql, a failed query is renamed to .err and printed as a warning
+        for lookup_file in \
+                "${DB_OVERVIEW_LOOKUP_FILE}" \
+                "${DB_PARAMETERS_LOOKUP_FILE}" \
+                "${DB_REDO_LOOKUP_FILE}" \
+                "${DB_SIZE_LOOKUP_FILE}" \
+                "${DB_TABLESPACES_LOOKUP_FILE}" \
+                "${DB_RESOURCE_LIMITS_LOOKUP_FILE}" \
+                "${DB_INVALID_OBJECTS_LOOKUP_FILE}" \
+                "${DB_OS_LOOKUP_FILE}"
+        do
+                check_lookup_file "${lookup_file}"
+        done
+
+        build_vital_parameters
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: build_vital_parameters()
+#| Database Information Collection
+#| Picks the init parameters listed in ${INIT_PARAMETERS_FILE} from all
+#| fetched parameters, in the order of the list, with their note.
+#| The expected value in the list is not shown in the report.
+#| Output: name|value|note
+#| value = (not set) for an underscore parameter that isn't set,
+#| value = (n/a) for a parameter that doesn't exist in this version.
+#| SGA, PGA and shared pool sizes are shown in MB, v$parameter has bytes.
+#+--------------------------------------------------------------------
+function build_vital_parameters() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        if [ ! -f "${DB_PARAMETERS_LOOKUP_FILE}" ]; then
+                echo "Warning: No init parameters fetched, skipping vital parameters"
+                return 0
+        fi
+
+        # First file: all parameters (name|value), second file: the list (name|expected|note)
+        awk -F'|' '
+                NR == FNR { value[$1] = $2; seen[$1] = 1; next }
+                /^#/ || NF == 0 { next }
+                {
+                        if ($1 in seen)     v = value[$1]
+                        else if ($1 ~ /^_/) v = "(not set)"
+                        else                v = "(n/a)"
+                        if ($1 ~ /^(sga_target|sga_max_size|pga_aggregate_target|pga_aggregate_limit|shared_pool_size)$/ && v ~ /^[0-9]+$/)
+                                v = int(v / 1048576) " MB"
+                        print $1 "|" v "|" $3
+                }
+        ' "${DB_PARAMETERS_LOOKUP_FILE}" "${INIT_PARAMETERS_FILE}" > "${DB_VITAL_PARAMETERS_LOOKUP_FILE}"
+
+}
+
+#+======================================================================================================================================
+#| EBS APPLICATIONS, report section 3
+#+======================================================================================================================================
+
+#+--------------------------------------------------------------------
+#| Function: fetch_ebs_information()
+#| eBS Information Collection
+#| Checks the eBS Applications lookup files written by run_sql.sql in
+#| fetch_db_information(), then picks the listed profile options and
+#| reads the listed context file parameters.
+#+--------------------------------------------------------------------
+function fetch_ebs_information() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        local lookup_file
+
+        # eBS lookup files written by run_sql.sql, a failed query is renamed to .err and printed as a warning
+        for lookup_file in \
+                "${EBS_OVERVIEW_LOOKUP_FILE}" \
+                "${EBS_PROFILES_LOOKUP_FILE}" \
+                "${EBS_PROFILE_CHANGES_LOOKUP_FILE}" \
+                "${EBS_DEBUG_PROFILES_LOOKUP_FILE}" \
+                "${EBS_NODES_LOOKUP_FILE}" \
+                "${EBS_ADOP_SESSIONS_LOOKUP_FILE}" \
+                "${EBS_CONTEXT_FILES_LOOKUP_FILE}" \
+                "${EBS_MANAGERS_LOOKUP_FILE}" \
+                "${EBS_WORKFLOW_LOOKUP_FILE}"
+        do
+                check_lookup_file "${lookup_file}"
+        done
+
+        build_profile_options
+        build_context_parameters
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: build_profile_options()
+#| eBS Information Collection
+#| Picks the profiles listed in ${PROFILE_OPTIONS_FILE} from all fetched
+#| profile options, in the order of the list. A profile is found on its
+#| user profile option name (i.e FND: Diagnostics) or its internal name
+#| (FND_DIAGNOSTICS), ignoring case. Only the first field of the list is
+#| used, anything after a | is ignored.
+#| One row per user, a profile without user values has one row.
+#| Output: user name|name|site value|user|user value
+#| name = (n/a) for a profile that doesn't exist in this instance.
+#+--------------------------------------------------------------------
+function build_profile_options() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        # The profile query failed, the report shows its error instead
+        if [ ! -f "${EBS_PROFILES_LOOKUP_FILE}" ]; then
+                return 0
+        fi
+
+        # First file: all profiles (name|user name|site value|user|user value), second file: the list (name)
+        # A profile can have many rows, one per user. They are collected under both names, once if the names are equal.
+        awk -F'|' '
+                NR == FNR {
+                        row = $2 "|" $1 "|" $3 "|" $4 "|" $5 "\n"
+                        rows[toupper($1)] = rows[toupper($1)] row
+                        if (toupper($2) != toupper($1)) rows[toupper($2)] = rows[toupper($2)] row
+                        next
+                }
+                /^#/ || NF == 0 { next }
+                {
+                        key = toupper($1)
+                        if (!(key in rows)) { print $1 "|(n/a)|(n/a)|-|-"; next }
+                        printf "%s", rows[key]
+                }
+        ' "${EBS_PROFILES_LOOKUP_FILE}" "${PROFILE_OPTIONS_FILE}" > "${EBS_VITAL_PROFILES_LOOKUP_FILE}"
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: build_context_parameters()
+#| eBS Information Collection
+#| Reads every parameter (oa_var) of the context file of this node,
+#| ${CONTEXT_FILE} (application tier, run file system), then picks the
+#| ones listed in ${CONTEXT_PARAMETERS_FILE}, in the order of the list.
+#| A parameter is one line in the XML, i.e
+#|   <dbport oa_var="s_dbport" oa_type="EXT_PORT" ...>1521</dbport>
+#|   <metalink_id oa_var="s_metalink_id"/>          (empty value)
+#| Output all:    oa_var name|value
+#| Output listed: oa_var name|value|expected|note
+#| value = (n/a) for a parameter that isn't in the context file.
+#| For the *_jvm_start_options parameters only the memory options are listed.
+#+--------------------------------------------------------------------
+function build_context_parameters() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        if [ ! -r "${CONTEXT_FILE:-}" ]; then
+                echo "Context file ${CONTEXT_FILE:-not set} can't be read" > "${EBS_CONTEXT_VARS_LOOKUP_FILE%.lookup}.err"
+                echo "Warning: Context file ${CONTEXT_FILE:-not set} can't be read"
+                return 0
+        fi
+
+        # All parameters: the name from oa_var="...", the value between the end of the tag and the next <
+        awk '
+                match($0, /oa_var="[^"]*"/) {
+                        name = substr($0, RSTART + 8, RLENGTH - 9)
+                        rest = substr($0, RSTART + RLENGTH)
+                        if (rest ~ /^[^>]*\/>/) {
+                                value = ""
+                        } else {
+                                sub(/^[^>]*>/, "", rest)
+                                sub(/<.*/, "", rest)
+                                value = rest
+                        }
+                        gsub(/\|/, "/", value)
+                        print name "|" value
+                }
+        ' "${CONTEXT_FILE}" > "${EBS_CONTEXT_VARS_LOOKUP_FILE}"
+
+        # First file: all parameters (name|value), second file: the list (name|expected|note)
+        # The *_jvm_start_options values are very long, only the memory options are kept for the report:
+        # -Xms, -Xmx, -Xss and -XX options with Size in the name. The full value stays in the all parameters file.
+        awk -F'|' '
+                function jvm_memory(options,    n, o, i, result) {
+                        n = split(options, o, " ")
+                        result = ""
+                        for (i = 1; i <= n; i++) {
+                                if (o[i] ~ /^-Xm[sx]/ || o[i] ~ /^-Xss/ || o[i] ~ /^-XX:.*Size/)
+                                        result = result (result == "" ? "" : " ") o[i]
+                        }
+                        return result
+                }
+                NR == FNR { if (!($1 in value)) value[$1] = $2; seen[$1] = 1; next }
+                /^#/ || NF == 0 { next }
+                {
+                        shown = value[$1]
+                        if ($1 ~ /_jvm_start_options$/) shown = jvm_memory(shown)
+                        if ($1 in seen) print $1 "|" (shown == "" ? "(empty)" : shown) "|" $2 "|" $3
+                        else            print $1 "|(n/a)|" $2 "|" $3
+                }
+        ' "${EBS_CONTEXT_VARS_LOOKUP_FILE}" "${CONTEXT_PARAMETERS_FILE}" > "${EBS_VITAL_CONTEXT_LOOKUP_FILE}"
+
+}
+
+#+======================================================================================================================================
+#| OPERATING SYSTEM, report section 1
+#+======================================================================================================================================
+
+#+--------------------------------------------------------------------
+#| Function: fetch_os_information()
+#| OS Information Collection
+#| Reads the OS of this node. Runs after fetch_db_information(), the
+#| database host is read from the database lookup files. HugePages are
+#| only checked when the database runs on this node, and added to the
+#| OS rows of this node.
+#+--------------------------------------------------------------------
+function fetch_os_information() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        echo ""
+        echo "Collecting OS Information"
+
+        build_os_tiers
+        build_os_apps_tier
+
+        if [ "${DB_SAME_HOST}" = "YES" ]; then
+                build_os_hugepages
+        fi
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: build_os_tiers()
+#| OS Information Collection
+#| Compares this node with the database host, on the short host names
+#| (without domain) ignoring case. Sets DB_SAME_HOST to YES or NO. The
+#| database host name is read from DB_OS_LOOKUP_FILE (db_os in run_sql.sql).
+#| Output: key|value
+#+--------------------------------------------------------------------
+function build_os_tiers() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        local apps_host db_host apps_short db_short
+
+        apps_host=$(hostname)
+        db_host=$(kv_value "${DB_OS_LOOKUP_FILE}" "Host Name")
+        apps_short=$(echo "${apps_host%%.*}" | tr 'A-Z' 'a-z')
+        db_short=$(echo "${db_host%%.*}" | tr 'A-Z' 'a-z')
+
+        if [ -n "${db_short}" ] && [ "${apps_short}" = "${db_short}" ]; then
+                DB_SAME_HOST=YES
+        else
+                DB_SAME_HOST=NO
+        fi
+
+        echo "Application Tier Host|${apps_host}" > "${OS_TIERS_LOOKUP_FILE}"
+        echo "Database Host|${db_host:-unknown}" >> "${OS_TIERS_LOOKUP_FILE}"
+        echo "Same Host|${DB_SAME_HOST}" >> "${OS_TIERS_LOOKUP_FILE}"
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: build_os_apps_tier()
+#| OS Information Collection
+#| OS release, kernel, CPU, memory, swap and uptime of this node.
+#| Output: key|value
+#+--------------------------------------------------------------------
+function build_os_apps_tier() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        local os_release lscpu_out cpu_model sockets cores threads mem_gb swap_gb
+
+        # OS release from /etc/os-release, /etc/redhat-release on older releases
+        os_release=$(grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d'"' -f2)
+        os_release=${os_release:-$(cat /etc/redhat-release 2>/dev/null)}
+
+        # CPU layout from lscpu, read once
+        lscpu_out=$(lscpu 2>/dev/null)
+        cpu_model=$(echo "${lscpu_out}" | awk -F': *' '/^Model name/ { print $2 }')
+        sockets=$(echo "${lscpu_out}" | awk -F': *' '/^Socket\(s\)/ { print $2 }')
+        cores=$(echo "${lscpu_out}" | awk -F': *' '/^Core\(s\) per socket/ { print $2 }')
+        threads=$(echo "${lscpu_out}" | awk -F': *' '/^Thread\(s\) per core/ { print $2 }')
+
+        # Memory and swap in GB, /proc/meminfo is in kB
+        mem_gb=$(awk '/^MemTotal/ { printf "%.1f", $2 / 1048576 }' /proc/meminfo)
+        swap_gb=$(awk '/^SwapTotal/ { printf "%.1f", $2 / 1048576 }' /proc/meminfo)
+
+        echo "Host Name|$(hostname)" > "${OS_APPS_TIER_LOOKUP_FILE}"
+        echo "OS Release|${os_release}" >> "${OS_APPS_TIER_LOOKUP_FILE}"
+        echo "Kernel|$(uname -r)" >> "${OS_APPS_TIER_LOOKUP_FILE}"
+        echo "Architecture|$(uname -m)" >> "${OS_APPS_TIER_LOOKUP_FILE}"
+        echo "CPU Model|${cpu_model}" >> "${OS_APPS_TIER_LOOKUP_FILE}"
+        echo "CPUs|$(nproc) (${sockets} socket x ${cores} cores x ${threads} threads)" >> "${OS_APPS_TIER_LOOKUP_FILE}"
+        echo "Memory (GB)|${mem_gb}" >> "${OS_APPS_TIER_LOOKUP_FILE}"
+        echo "Swap (GB)|${swap_gb}" >> "${OS_APPS_TIER_LOOKUP_FILE}"
+        echo "Uptime (days)|$(awk '{ printf "%.1f", $1 / 86400 }' /proc/uptime)" >> "${OS_APPS_TIER_LOOKUP_FILE}"
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: build_os_hugepages()
+#| OS Information Collection
+#| Only when the database runs on this node. Transparent HugePages should
+#| be disabled (never, shown as Not Configured), traditional HugePages
+#| configured on OS level and in use (by the SGA). Prints a warning if not.
+#| The rows are added to the OS rows of this node (build_os_apps_tier).
+#| Output: key|value
+#+--------------------------------------------------------------------
+function build_os_hugepages() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        local thp thp_text total free configured in_use
+
+        # The active Transparent HugePages setting is the one in brackets, i.e "always madvise [never]"
+        thp=$(sed -n 's/.*\[\(.*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)
+
+        # never = disabled, shown as Not Configured, otherwise the setting, i.e Configured (always)
+        if [ "${thp}" = "never" ]; then
+                thp_text="Not Configured"
+        else
+                thp_text="Configured (${thp:-unknown})"
+        fi
+
+        # Configured = HugePages_Total above 0, in use = some of them taken (Total - Free above 0)
+        total=$(awk '/^HugePages_Total/ { print $2 }' /proc/meminfo)
+        free=$(awk '/^HugePages_Free/ { print $2 }' /proc/meminfo)
+        [ ${total:-0} -gt 0 ] && configured=YES || configured=NO
+        [ $(( ${total:-0} - ${free:-0} )) -gt 0 ] && in_use=YES || in_use=NO
+
+        echo "Transparent HugePages|${thp_text}" >> "${OS_APPS_TIER_LOOKUP_FILE}"
+        echo "HugePages Configured|${configured}" >> "${OS_APPS_TIER_LOOKUP_FILE}"
+        echo "HugePages In Use|${in_use}" >> "${OS_APPS_TIER_LOOKUP_FILE}"
+
+        if [ "${thp}" != "never" ] || [ "${in_use}" != "YES" ]; then
+                echo "Warning: Transparent HugePages ${thp_text}, HugePages configured ${configured}, in use ${in_use}"
+        fi
+
+}
+
+#+======================================================================================================================================
+#| Part: REPORT
+#|
+#| Description:
+#| Builds the HTML report from the .lookup files collected by COLLECT part.
+#|
+#| How the report is built:
+#| create_html_report() calls one build_<name>_section() function per report section (1 OS, 2 Database, 3 eBS).
+#| A section function writes its part of the page to ${HTML_BODY_FILE} with the html_* help functions below, mostly
+#| html_table() that turns one lookup file into a table. When all sections are written, create_html_report() writes
+#| ${HTML_FILE}: the head with the style sheet, the title, the table of contents and then the body.
+#|
+#| The file contains, in this order:
+#|   Help functions         html_escape, html_section_start/end, html_subsection, html_heading, html_intro,
+#|                          html_notice, html_kv, html_table, html_details_start/end, html_style
+#|   Report sections        build_os_section, build_db_section, build_ebs_section
+#|   Report                 create_html_report
+#|
+#+======================================================================================================================================
+
+NAV_ITEMS=()                                                                            # Table of contents, id|title|level (1 = section, 2 = subsection)
+SECTION_NR=0                                                                            # Number of the current section, 1 = OS, 2 = Database, 3 = eBS
+SUBSECTION_NR=0                                                                         # Number of the current subsection within the section, i.e 2.3
+
+#+======================================================================================================================================
+#| HELP FUNCTIONS
+#| All of them append to ${HTML_BODY_FILE}, except html_style() that writes into the <head> of ${HTML_FILE}.
+#+======================================================================================================================================
+
+#+--------------------------------------------------------------------
+#| Function: html_escape()
+#| HTML Help Function
+#| Escapes &, < and > in a text so it is shown as text, not read as HTML
+#| $1 = text
+#+--------------------------------------------------------------------
+function html_escape() {
+
+        printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: html_section_start() / html_section_end()
+#| HTML Help Function
+#| Starts and ends a numbered report section (1, 2, 3 ...) with a "top"
+#| link back to the table of contents, and adds it to the contents.
+#| $1 = anchor id, $2 = section title
+#+--------------------------------------------------------------------
+function html_section_start() {
+
+        SECTION_NR=$(( SECTION_NR + 1 ))
+        SUBSECTION_NR=0
+        NAV_ITEMS+=("$1|${SECTION_NR} $2|1")
+        echo "<section id=\"$1\">" >> "${HTML_BODY_FILE}"
+        echo "<h2>${SECTION_NR} $(html_escape "$2") <a class=\"top\" href=\"#contents\">top</a></h2>" >> "${HTML_BODY_FILE}"
+
+}
+
+function html_section_end() {
+
+        echo "</section>" >> "${HTML_BODY_FILE}"
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: html_subsection()
+#| HTML Help Function
+#| Numbered subsection (2.1, 2.2 ...) with an optional intro text,
+#| added to the table of contents.
+#| $1 = anchor id, $2 = title, $3 = optional intro text
+#+--------------------------------------------------------------------
+function html_subsection() {
+
+        SUBSECTION_NR=$(( SUBSECTION_NR + 1 ))
+        NAV_ITEMS+=("$1|${SECTION_NR}.${SUBSECTION_NR} $2|2")
+        echo "<h3 id=\"$1\">${SECTION_NR}.${SUBSECTION_NR} $(html_escape "$2")</h3>" >> "${HTML_BODY_FILE}"
+        if [ -n "${3:-}" ]; then
+                html_intro "$3"
+        fi
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: html_heading()
+#| HTML Help Function
+#| Small heading for a second table in a subsection, not numbered and
+#| not in the table of contents.
+#| $1 = heading text
+#+--------------------------------------------------------------------
+function html_heading() {
+
+        echo "<h4>$(html_escape "$1")</h4>" >> "${HTML_BODY_FILE}"
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: html_intro()
+#| HTML Help Function
+#| Short grey text explaining the table below it.
+#| $1 = text
+#+--------------------------------------------------------------------
+function html_intro() {
+
+        echo "<p class=\"intro\">$(html_escape "$1")</p>" >> "${HTML_BODY_FILE}"
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: html_notice()
+#| HTML Help Function
+#| Text in a coloured box, i.e "Information not available: ORA-...".
+#| $1 = level (info = blue, warn = yellow, crit = red), $2 = text
+#+--------------------------------------------------------------------
+function html_notice() {
+
+        echo "<div class=\"notice $1\">$(html_escape "$2")</div>" >> "${HTML_BODY_FILE}"
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: html_kv()
+#| HTML Help Function
+#| Small Property|Value table for values that aren't in a lookup file,
+#| i.e environment variables. An empty value is shown as -
+#| $@ = rows, each one label|value
+#+--------------------------------------------------------------------
+function html_kv() {
+
+        local row label value
+
+        echo "<table class=\"kv\"><tbody>" >> "${HTML_BODY_FILE}"
+        for row in "$@"
+        do
+                IFS='|' read -r label value <<< "${row}"
+                echo "<tr><th>$(html_escape "${label}")</th><td>$(html_escape "${value:--}")</td></tr>" >> "${HTML_BODY_FILE}"
+        done
+        echo "</tbody></table>" >> "${HTML_BODY_FILE}"
+
+}
+
+#+--------------------------------------------------------------------------------------------------------------
+#| Function: html_table()
+#| HTML Help Function
+#| Turns one .lookup file into a HTML table: each line becomes a row, each | separated column a cell.
+#| Shows the ORA- error instead if the query failed (.err file), or "No rows returned." for an empty file.
+#| $1 = lookup file
+#| $2 = column names, separated by |
+#| $3 = optional rules, comma separated, mark cells (columns are numbered from 1):
+#|      eq:COL:VALUE        OK when the cell equals VALUE, otherwise CHECK
+#|      cmp:COL:EXPCOL      OK when the cell equals the expected value in column EXPCOL, otherwise CHECK
+#|      kv:KEY:VALUE        In a kv table, OK when the value of KEY equals VALUE, otherwise CHECK
+#|      pct:COL:WARN:CRIT   Percent with a small bar, CHECK from WARN, critical from CRIT
+#|      code:COL            Cell shown in monospace (paths, parameter names)
+#| $4 = optional, kv gives a two column Property|Value table without a header row
+#| i.e html_table "${DB_RESOURCE_LIMITS_LOOKUP_FILE}" "Resource|Current|Max Since Startup|Limit|% of Limit" "pct:5:80:90"
+#+--------------------------------------------------------------------------------------------------------------
+function html_table() {
+
+        local lookup_file="$1"
+        local error_file="${lookup_file%.lookup}.err"
+
+        # The query failed, show the first ORA-/SP2- error instead of the table
+        if [ -f "${error_file}" ]; then
+                html_notice "warn" "Information not available: $(grep -m1 -E 'ORA-|SP2-' "${error_file}" || head -1 "${error_file}")"
+                return 0
+        fi
+
+        # The query ran but returned no rows
+        if [ ! -s "${lookup_file}" ] || ! grep -q '[^[:space:]]' "${lookup_file}"; then
+                html_notice "info" "No rows returned."
+                return 0
+        fi
+
+        awk -v header="$2" -v rules="${3:-}" -v css="${4:-}" '
+
+        # Escapes a text for HTML
+        function esc(s) {
+                gsub(/&/, "\\&amp;", s)
+                gsub(/</, "\\&lt;", s)
+                gsub(/>/, "\\&gt;", s)
+                gsub(/"/, "\\&quot;", s)
+                return s
+        }
+
+        # Removes leading and trailing blanks, sqlplus pads some values
+        function trim(s) {
+                gsub(/^[ \t\r]+|[ \t\r]+$/, "", s)
+                return s
+        }
+
+        # OK (green) or CHECK (yellow) marking of a cell
+        function badge(text, level) {
+                return "<span class=\"badge " level "\">" text "</span>"
+        }
+
+        # Level of a percent value: ok, warn from WARN, crit from CRIT
+        function level_for(value, warn, crit) {
+                if (value + 0 >= crit + 0) return "crit"
+                if (value + 0 >= warn + 0) return "warn"
+                return "ok"
+        }
+
+        # Splits the rules into type and arguments, writes the table start and the header row
+        BEGIN {
+                FS = "|"
+                ncols = split(header, h, "|")
+                nrules = (rules == "") ? 0 : split(rules, r, ",")
+                for (i = 1; i <= nrules; i++) {
+                        split(r[i], p, ":")
+                        rtype[i] = p[1]; rarg1[i] = p[2]; rarg2[i] = p[3]; rarg3[i] = p[4]
+                }
+
+                print "<div class=\"table-wrap\"><table class=\"" css "\">"
+                if (css != "kv") {
+                        printf "<thead><tr>"
+                        for (c = 1; c <= ncols; c++) printf "<th>%s</th>", esc(h[c])
+                        print "</tr></thead>"
+                }
+                print "<tbody>"
+        }
+
+        # Skips empty lines
+        trim($0) == "" { next }
+
+        # One table row per line, the rules are applied to each cell
+        {
+                printf "<tr>"
+                for (c = 1; c <= ncols; c++) {
+                        value = trim($c)
+                        cell = esc(value)
+                        for (i = 1; i <= nrules; i++) {
+                                if (rtype[i] == "pct" && c == rarg1[i] && value != "") {
+                                        level = level_for(value, rarg2[i], rarg3[i])
+                                        width = (value + 0 > 100) ? 100 : value + 0
+                                        cell = "<div class=\"meter\"><span class=\"" level "\" style=\"width:" width "%\"></span></div><span class=\"num\">" cell "%</span>"
+                                }
+                                else if (rtype[i] == "eq" && c == rarg1[i] && value != "") {
+                                        cell = badge(cell, (toupper(value) == toupper(rarg2[i])) ? "ok" : "warn")
+                                }
+                                else if (rtype[i] == "cmp" && c == rarg1[i]) {
+                                        # No badge when there is no expected value, or the item does not exist (n/a)
+                                        expected = trim($(rarg2[i]))
+                                        if (expected != "" && value != "(n/a)")
+                                                cell = badge(cell, (toupper(value) == toupper(expected)) ? "ok" : "warn")
+                                }
+                                else if (rtype[i] == "kv" && c == 2 && trim($1) == rarg1[i] && value != "") {
+                                        cell = badge(cell, (toupper(value) == toupper(rarg2[i])) ? "ok" : "warn")
+                                }
+                                else if (rtype[i] == "code" && c == rarg1[i] && value != "") {
+                                        cell = "<code>" cell "</code>"
+                                }
+                        }
+                        # In a kv table the first column is the row heading
+                        if (css == "kv" && c == 1) printf "<th>%s</th>", cell
+                        else printf "<td>%s</td>", cell
+                }
+                print "</tr>"
+        }
+
+        END {
+                print "</tbody></table></div>"
+        }
+        ' "${lookup_file}" >> "${HTML_BODY_FILE}"
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: html_details_start() / html_details_end()
+#| HTML Help Function
+#| Collapsible block for long lists, closed until clicked.
+#| $1 = text shown on the closed block
+#+--------------------------------------------------------------------
+function html_details_start() {
+
+        echo "<details><summary>$(html_escape "$1")</summary>" >> "${HTML_BODY_FILE}"
+
+}
+
+function html_details_end() {
+
+        echo "</details>" >> "${HTML_BODY_FILE}"
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: html_style()
+#| HTML Help Function
+#| Writes the style sheet of the report into the <head> of ${HTML_FILE}:
+#| plain left aligned layout, bordered tables, OK/CHECK colours.
+#+--------------------------------------------------------------------
+function html_style() {
+
+        echo "<style>" >> "${HTML_FILE}"
+
+        # Page, headings and text
+        echo "body { margin: 16px 24px 32px; background: #ffffff; color: #000000; font: 13px/1.4 Arial, Helvetica, sans-serif; }" >> "${HTML_FILE}"
+        echo "h1 { font-size: 20px; margin: 0 0 4px; }" >> "${HTML_FILE}"
+        echo "h2 { font-size: 16px; margin: 32px 0 8px; padding-bottom: 3px; border-bottom: 2px solid #000000; }" >> "${HTML_FILE}"
+        echo "h3 { font-size: 14px; margin: 20px 0 4px; }" >> "${HTML_FILE}"
+        echo "h4 { font-size: 13px; margin: 14px 0 4px; }" >> "${HTML_FILE}"
+        echo "a { color: #1a4f8b; }" >> "${HTML_FILE}"
+        echo "a.top { font-size: 11px; font-weight: normal; margin-left: 8px; }" >> "${HTML_FILE}"
+        echo ".meta { margin: 2px 0; color: #444444; }" >> "${HTML_FILE}"
+        echo ".intro { margin: 0 0 6px; color: #444444; }" >> "${HTML_FILE}"
+
+        # Table of contents
+        echo ".contents a { display: block; text-decoration: none; padding: 1px 0; }" >> "${HTML_FILE}"
+        echo ".contents a:hover { text-decoration: underline; }" >> "${HTML_FILE}"
+        echo ".contents a.l1 { font-weight: bold; margin-top: 6px; }" >> "${HTML_FILE}"
+        echo ".contents a.l2 { padding-left: 24px; }" >> "${HTML_FILE}"
+
+        # Tables
+        echo ".table-wrap { overflow-x: auto; margin: 4px 0; }" >> "${HTML_FILE}"
+        echo "table { border-collapse: collapse; margin: 4px 0; }" >> "${HTML_FILE}"
+        echo "th, td { text-align: left; vertical-align: top; padding: 3px 8px; border: 1px solid #b5b5b5; }" >> "${HTML_FILE}"
+        echo "thead th { background: #e6e6e6; white-space: nowrap; }" >> "${HTML_FILE}"
+        echo "table.kv th { background: #f2f2f2; font-weight: normal; white-space: nowrap; }" >> "${HTML_FILE}"
+        echo "code { font-family: Consolas, \"Courier New\", monospace; font-size: 12px; }" >> "${HTML_FILE}"
+
+        # OK / CHECK / critical marking of a cell
+        echo ".badge { padding: 0 4px; font-weight: bold; }" >> "${HTML_FILE}"
+        echo ".badge.ok { color: #1d6b3a; }" >> "${HTML_FILE}"
+        echo ".badge.warn { background: #fde9b5; color: #6b4500; }" >> "${HTML_FILE}"
+        echo ".badge.warn::after { content: \" CHECK\"; font-size: 10px; }" >> "${HTML_FILE}"
+        echo ".badge.crit { background: #f8cccc; color: #8a1c1c; }" >> "${HTML_FILE}"
+
+        # Percent bar (pct: rule)
+        echo ".meter { display: inline-block; width: 80px; height: 8px; border: 1px solid #b5b5b5; vertical-align: middle; margin-right: 6px; }" >> "${HTML_FILE}"
+        echo ".meter span { display: block; height: 100%; }" >> "${HTML_FILE}"
+        echo ".meter .ok { background: #3d8b5a; } .meter .warn { background: #d99a1e; }" >> "${HTML_FILE}"
+        echo ".meter .crit { background: #c03b3b; }" >> "${HTML_FILE}"
+
+        # Notices and collapsible blocks
+        echo ".notice { margin: 4px 0; padding: 3px 8px; border-left: 3px solid #6b8fb8; background: #f2f5f9; }" >> "${HTML_FILE}"
+        echo ".notice.warn { border-left-color: #d99a1e; background: #fdf5e0; }" >> "${HTML_FILE}"
+        echo ".notice.crit { border-left-color: #c03b3b; background: #fbe8e8; }" >> "${HTML_FILE}"
+        echo "details { margin: 6px 0; }" >> "${HTML_FILE}"
+        echo "summary { cursor: pointer; color: #1a4f8b; }" >> "${HTML_FILE}"
+
+        # Printing, no top links and no heading alone at the bottom of a page
+        echo "@media print {" >> "${HTML_FILE}"
+        echo "  body { margin: 0; }" >> "${HTML_FILE}"
+        echo "  a.top { display: none; }" >> "${HTML_FILE}"
+        echo "  h2 { break-after: avoid; }" >> "${HTML_FILE}"
+        echo "}" >> "${HTML_FILE}"
+
+        echo "</style>" >> "${HTML_FILE}"
+
+}
+
+#+======================================================================================================================================
+#| REPORT SECTIONS
+#| One function per section, in report order. Each subsection is a html_subsection() followed by its tables.
+#+======================================================================================================================================
+
+#+--------------------------------------------------------------------
+#| Function: build_os_section()
+#| Report Section
+#| 1 Operating System, from the OS_* lookup files (and DB_OS_LOOKUP_FILE
+#| when the database runs on a separate host).
+#| Same host:     1.1 Tiers, 1.2 One Tier Config (APPS + DB), with HugePages
+#| Separate host: 1.1 Tiers, 1.2 DB Tier, 1.3 APPS Tier
+#+--------------------------------------------------------------------
+function build_os_section() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        html_section_start "os" "Operating System"
+
+        # 1.1 Tiers
+        html_subsection "os-tiers" "Tiers"
+        html_table "${OS_TIERS_LOOKUP_FILE}" "Property|Value" "" "kv"
+
+        if [ "${DB_SAME_HOST}" = "YES" ]; then
+                # 1.2 One Tier Config, one host for both tiers, HugePages rows included (build_os_hugepages)
+                html_subsection "os-apps-tier" "One Tier Config (APPS + DB)"
+                html_table "${OS_APPS_TIER_LOOKUP_FILE}" "Property|Value" "kv:Transparent HugePages:Not Configured,kv:HugePages Configured:YES,kv:HugePages In Use:YES" "kv"
+        else
+                # 1.2 DB Tier, host name, CPU and memory of the separate database host
+                html_subsection "os-db-tier" "DB Tier"
+                html_table "${DB_OS_LOOKUP_FILE}" "Property|Value" "" "kv"
+
+                # 1.3 APPS Tier, this node, where the snapshot was run
+                html_subsection "os-apps-tier" "APPS Tier"
+                html_table "${OS_APPS_TIER_LOOKUP_FILE}" "Property|Value" "" "kv"
+        fi
+
+        html_section_end
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: build_db_section()
+#| Report Section
+#| 2 Database, from the DB_* lookup files.
+#+--------------------------------------------------------------------
+function build_db_section() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        html_section_start "db" "Database"
+
+        # 2.1 Overview
+        html_subsection "db-overview" "Overview"
+        html_table "${DB_OVERVIEW_LOOKUP_FILE}" "Property|Value" "" "kv"
+
+        # 2.2 Init Parameters, the listed ones
+        html_subsection "db-parameters" "Init Parameters"
+        html_table "${DB_VITAL_PARAMETERS_LOOKUP_FILE}" "Parameter|Value|Note" "code:1"
+
+        # 2.3 Transaction Management / Online / Standby Redo Log Files, one row per log member
+        html_subsection "db-redo" "Transaction Management / Online / Standby Redo Log Files"
+        html_table "${DB_REDO_LOOKUP_FILE}" "Thread#|Group#|Member|Size (MB)|Blocksize" "code:3"
+
+        # 2.4 Storage
+        html_subsection "db-storage" "Storage"
+        html_table "${DB_SIZE_LOOKUP_FILE}" "Property|Value" "" "kv"
+        html_heading "Tablespaces"
+        html_table "${DB_TABLESPACES_LOOKUP_FILE}" "Tablespace|Contents|Datafiles|Autoextend|Allocated (GB)|Max (GB)|Used (GB)|Used of Max" "pct:8:85:95"
+
+        # 2.5 Health
+        html_subsection "db-health" "Health"
+        html_table "${DB_RESOURCE_LIMITS_LOOKUP_FILE}" "Resource|Current|Max Since Startup|Limit|% of Limit" "pct:5:80:90"
+        html_heading "Invalid Objects"
+        html_table "${DB_INVALID_OBJECTS_LOOKUP_FILE}" "Owner|Object Type|Count"
+
+        html_section_end
+
+}
+
+#+--------------------------------------------------------------------
+#| Function: build_ebs_section()
+#| Report Section
+#| 3 eBS Applications, from the EBS_* lookup files and the file system
+#| variables of the sourced environment.
+#+--------------------------------------------------------------------
+function build_ebs_section() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        html_section_start "ebs" "eBS Applications"
+
+        # 3.1 Overview
+        html_subsection "ebs-overview" "Overview"
+        html_table "${EBS_OVERVIEW_LOOKUP_FILE}" "Property|Value" "" "kv"
+
+        # 3.2 Profile Options, only the ones listed in parameters.lst
+        html_subsection "ebs-profiles" "Profile Options"
+        if ! grep -v '^#' "${PROFILE_OPTIONS_FILE}" 2>/dev/null | grep -q '[^[:space:]]'; then
+                html_notice "info" "No profile options listed in parameters.lst."
+        elif [ -f "${EBS_PROFILES_LOOKUP_FILE%.lookup}.err" ]; then
+                # The profile query failed, html_table() shows its ORA- error
+                html_table "${EBS_PROFILES_LOOKUP_FILE}" ""
+        else
+                html_table "${EBS_VITAL_PROFILES_LOOKUP_FILE}" "Name|Profile|Site Value|User|User Value" "code:2"
+        fi
+        html_heading "Changed Since Instance Created"
+        html_details_start "Changed profile values ($(cat "${EBS_PROFILE_CHANGES_LOOKUP_FILE}" 2>/dev/null | wc -l))"
+        html_table "${EBS_PROFILE_CHANGES_LOOKUP_FILE}" "Name|Profile|Level|Level Value|Value|Changed|Changed By" "code:2"
+        html_details_end
+
+        # 3.3 Trace and Debug Profiles, set to Y at site level or set for a user
+        html_subsection "ebs-debug-profiles" "Trace and Debug Profiles"
+        html_table "${EBS_DEBUG_PROFILES_LOOKUP_FILE}" "Name|Profile|Site Value|User|User Value" "code:2"
+
+        # 3.4 FND NODES, nodes registered in FND_NODES and the services each node runs
+        html_subsection "ebs-nodes" "FND NODES"
+        html_table "${EBS_NODES_LOOKUP_FILE}" "Node|Host|IP Address|Concurrent|Forms|Web|Admin|Database|Status" "eq:9:Y"
+
+        # 3.5 ADOP Cycle Status, latest 10 adop cycles, newest first
+        html_subsection "ebs-adop" "ADOP Cycle Status"
+        html_table "${EBS_ADOP_SESSIONS_LOOKUP_FILE}" "Session|Node|Started|Prepare|Apply|Finalize|Cutover|Cleanup|Abort"
+
+        # 3.6 Context Files, run file system and database tier
+        html_subsection "ebs-context-files" "Context Files"
+        html_table "${EBS_CONTEXT_FILES_LOOKUP_FILE}" "Tier|Context Name|Path" "code:3"
+
+        # 3.7 Context File Parameters, only the ones listed in parameters.lst
+        html_subsection "ebs-context-parameters" "Context File Parameters"
+        if ! grep -v '^#' "${CONTEXT_PARAMETERS_FILE}" 2>/dev/null | grep -q '[^[:space:]]'; then
+                html_notice "info" "No context parameters listed in parameters.lst."
+        elif [ -f "${EBS_CONTEXT_VARS_LOOKUP_FILE%.lookup}.err" ]; then
+                # The context file couldn't be read, html_table() shows the reason
+                html_table "${EBS_CONTEXT_VARS_LOOKUP_FILE}" ""
+        else
+                html_table "${EBS_VITAL_CONTEXT_LOOKUP_FILE}" "Parameter|Value|Expected|Note" "code:1,cmp:2:3"
+        fi
+
+        # 3.8 Concurrent Managers
+        html_subsection "ebs-concurrent" "Concurrent Managers"
+        html_table "${EBS_MANAGERS_LOOKUP_FILE}" "Manager|Description|Short Name|Queue ID|Node|Target|Actual|State|Cache Size|Sleep (s)|Log File" "cmp:7:6,code:11"
+
+        # 3.9 Workflow
+        html_subsection "ebs-workflow" "Workflow"
+        html_table "${EBS_WORKFLOW_LOOKUP_FILE}" "Component|Type|Startup Mode|Status|Container|Container Processes (Actual / Target)"
+
+        html_section_end
+
+}
+
+#+======================================================================================================================================
+#| REPORT
+#+======================================================================================================================================
+
+#+--------------------------------------------------------------------
+#| Function: create_html_report()
+#| Report Function
+#| Builds all report sections into ${HTML_BODY_FILE}, then writes the
+#| report ${HTML_FILE}: head with style sheet, title with the creation
+#| time, table of contents and the body.
+#| The file is named after the PDB (multitenant) or the database.
+#| $1 = optional system name shown in the browser tab title
+#+--------------------------------------------------------------------
+function create_html_report() {
+
+        if [ ${EXITSTATUS} = 1 ]; then
+                return 0
+        fi
+
+        local db_name system_name item id title level
+
+        # On a multitenant database the PDB (where APPS connects) names the system, not the CDB.
+        if [ "$(kv_value "${DB_OVERVIEW_LOOKUP_FILE}" "Multitenant")" = "YES" ]; then
+                db_name=$(kv_value "${DB_OVERVIEW_LOOKUP_FILE}" "Pluggable Database Name")
+        else
+                db_name=$(kv_value "${DB_OVERVIEW_LOOKUP_FILE}" "Database Name")
+        fi
+        db_name=${db_name:-${TWO_TASK:-UNKNOWN}}
+        system_name="${1:-${db_name}}"
+        HTML_FILE="${SCRIPT_DIR}/ebs_snapshot_${db_name}_${DATE}.html"
+
+        # Report sections, add new sections here
+        : > "${HTML_BODY_FILE}"
+        build_os_section
+        build_db_section
+        build_ebs_section
+
+        # Head
+        echo "<!doctype html>" > "${HTML_FILE}"
+        echo "<html lang=\"en\">" >> "${HTML_FILE}"
+        echo "<head>" >> "${HTML_FILE}"
+        echo "<meta charset=\"utf-8\">" >> "${HTML_FILE}"
+        echo "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" >> "${HTML_FILE}"
+        echo "<title>eBS Snapshot $(html_escape "${system_name}")</title>" >> "${HTML_FILE}"
+        html_style
+        echo "</head>" >> "${HTML_FILE}"
+
+        # Title and when the report was created, nothing else
+        echo "<body>" >> "${HTML_FILE}"
+        echo "<h1>eBS Instance Snapshot</h1>" >> "${HTML_FILE}"
+        echo "<p class=\"meta\">Created $(date +"%Y-%m-%d %H:%M")</p>" >> "${HTML_FILE}"
+
+        # Table of contents, from the sections and subsections registered in NAV_ITEMS
+        echo "<div id=\"contents\" class=\"contents\">" >> "${HTML_FILE}"
+        echo "<h2>Contents</h2>" >> "${HTML_FILE}"
+        for item in "${NAV_ITEMS[@]}"
+        do
+                IFS='|' read -r id title level <<< "${item}"
+                echo "<a class=\"l${level}\" href=\"#${id}\">$(html_escape "${title}")</a>" >> "${HTML_FILE}"
+        done
+        echo "</div>" >> "${HTML_FILE}"
+
+        # Body
+        cat "${HTML_BODY_FILE}" >> "${HTML_FILE}"
+        echo "</body>" >> "${HTML_FILE}"
+        echo "</html>" >> "${HTML_FILE}"
+
+}

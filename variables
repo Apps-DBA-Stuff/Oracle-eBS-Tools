@@ -1,0 +1,102 @@
+#+======================================================================================================================================
+#| File Name:
+#| variables
+#|
+#| Description:
+#| All variables of the eBS Instance Snapshot. Read (sourced) by create_instance_snapshot.sh at start, before the function files.
+#| ${SCRIPT_DIR}, the tool directory, is set by the main script before this file is read.
+#|
+#| The file has four parts:
+#|   PROGRAM VARIABLES        status and values set during the run
+#|   FILES                    SQL script and the lists
+#|   WORK DIRECTORY           created here with mktemp, removed at the end of the run
+#|   LOOKUP FILES             one file per query or check in the work directory, grouped per report section
+#|
+#| Change History:
+#|
+#| 2026-10-18   0.1     Fredrik Lindkvist                       Creation
+#| 2026-10-25   0.2     Fredrik Lindkvist                       Cleaned up and commented, lookup files grouped per report section
+#+======================================================================================================================================
+
+#|
+#| PROGRAM VARIABLES
+#|
+
+DATE=$(date +"%Y-%m-%d_%H%M%S")                                                         # Run date and time, part of the report file name
+EXITSTATUS=0                                                                            # 0 = OK, 1 = an error occurred, the remaining functions are skipped
+
+# Set during runtime
+DB_VERSION=""                                                                           # Database version, i.e 19.26, set in fetch_db_information()
+DB_SAME_HOST=NO                                                                         # YES when the database runs on this node, set in build_os_tiers()
+HTML_FILE=""                                                                            # The report, set in create_html_report() when the database name is known
+
+#|
+#| END PROGRAM VARIABLES
+#|
+
+#|
+#| FILES | All in the tool directory
+#|
+
+RUN_SQL="${SCRIPT_DIR}/run_sql.sql"                                                     # All SQL, writes the DB_* and EBS_* lookup files
+PARAMETERS_FILE="${SCRIPT_DIR}/parameters.lst"                                          # The lists: init parameters, profile options and context file parameters, one section each
+
+#|
+#| END FILES
+#|
+
+#|
+#| WORK DIRECTORY | Private directory for this run, named after the run date and time like the report,
+#| i.e /tmp/ebs_snapshot_2026-10-25_162253.Ab12Cd. housekeeping() removes it with the lookup files on every exit.
+#| Empty if mktemp fails (i.e /tmp full), check_environment() then stops the program.
+#|
+
+TMP_DIR=$(mktemp -d /tmp/ebs_snapshot_${DATE}.XXXXXX)                                   # Work directory, holds the lookup files and the report body
+HTML_BODY_FILE="${TMP_DIR}/report_body.html"                                            # Report body, written section by section, then merged into the report
+INIT_PARAMETERS_FILE="${TMP_DIR}/init_parameters.lst"                                   # 2.2  [INIT_PARAMETERS] of PARAMETERS_FILE, format name|expected value|note
+PROFILE_OPTIONS_FILE="${TMP_DIR}/profile_options.lst"                                   # 3.2  [PROFILE_OPTIONS] of PARAMETERS_FILE, one user or internal name per line
+CONTEXT_PARAMETERS_FILE="${TMP_DIR}/context_parameters.lst"                             # 3.7  [CONTEXT_PARAMETERS] of PARAMETERS_FILE, format oa_var name|expected value|note
+
+#|
+#| END WORK DIRECTORY
+#|
+
+#|
+#| LOOKUP FILES | One file per query or check in ${TMP_DIR}, one row per line, columns separated by |
+#| A query that fails leaves a .err file with the ORA- error instead, the report shows the error in place of the table.
+#| The comment gives the report section (i.e 2.1) and the contents.
+#|
+
+# 1 Operating System, built in inc_functions from the OS of this node (not SQL), except DB_OS_LOOKUP_FILE below
+OS_TIERS_LOOKUP_FILE="${TMP_DIR}/os_tiers.lookup"                                       # 1.1  Application tier host, database host and if they are the same host
+OS_APPS_TIER_LOOKUP_FILE="${TMP_DIR}/os_apps_tier.lookup"                               # 1.2/1.3  OS of this node: 1.2 One Tier Config with HugePages rows on the same host, else 1.3 APPS Tier
+
+# 2 Database, written by run_sql.sql (built in bash where noted)
+DB_VERSION_LOOKUP_FILE="${TMP_DIR}/db_version.lookup"                                   #      Database version, the program stops without it
+DB_OVERVIEW_LOOKUP_FILE="${TMP_DIR}/db_overview.lookup"                                 # 2.1  Name, PDB, status, version, role, archive log mode, character sets, FRA
+DB_PARAMETERS_LOOKUP_FILE="${TMP_DIR}/db_parameters.lookup"                             # 2.2  All init parameters
+DB_VITAL_PARAMETERS_LOOKUP_FILE="${TMP_DIR}/db_vital_parameters.lookup"                 # 2.2  Init parameters from INIT_PARAMETERS_FILE with note, built in bash
+DB_REDO_LOOKUP_FILE="${TMP_DIR}/db_redo.lookup"                                         # 2.3  Online redo log members, thread, group, size and blocksize
+DB_SIZE_LOOKUP_FILE="${TMP_DIR}/db_size.lookup"                                         # 2.4  Allocated and used size of datafiles and tempfiles
+DB_TABLESPACES_LOOKUP_FILE="${TMP_DIR}/db_tablespaces.lookup"                           # 2.4  Tablespace usage, datafiles, autoextend and max size
+DB_RESOURCE_LIMITS_LOOKUP_FILE="${TMP_DIR}/db_resource_limits.lookup"                   # 2.5  Processes, sessions and parallel servers against their limits
+DB_INVALID_OBJECTS_LOOKUP_FILE="${TMP_DIR}/db_invalid_objects.lookup"                   # 2.5  Invalid objects per owner and type
+DB_OS_LOOKUP_FILE="${TMP_DIR}/db_os.lookup"                                             # 1.2  Host name, CPU and memory of the database host (v$osstat), shown when on a separate host
+
+# 3 eBS Applications, written by run_sql.sql (built in bash where noted)
+EBS_OVERVIEW_LOOKUP_FILE="${TMP_DIR}/ebs_overview.lookup"                               # 3.1  Release, code levels, languages, products and users
+EBS_PROFILES_LOOKUP_FILE="${TMP_DIR}/ebs_profiles.lookup"                               # 3.2  All profile options with the site value and the user level values, one row per user
+EBS_VITAL_PROFILES_LOOKUP_FILE="${TMP_DIR}/ebs_vital_profiles.lookup"                   # 3.2  Profile options from PROFILE_OPTIONS_FILE, built in bash
+EBS_PROFILE_CHANGES_LOOKUP_FILE="${TMP_DIR}/ebs_profile_changes.lookup"                 # 3.2  Profile values changed since the instance was created, by whom (latest 200)
+EBS_DEBUG_PROFILES_LOOKUP_FILE="${TMP_DIR}/ebs_debug_profiles.lookup"                   # 3.3  Trace and Debug profiles set to Y at site level or set for a user
+EBS_NODES_LOOKUP_FILE="${TMP_DIR}/ebs_nodes.lookup"                                     # 3.4  Nodes in FND_NODES and their services
+EBS_ADOP_SESSIONS_LOOKUP_FILE="${TMP_DIR}/ebs_adop_sessions.lookup"                     # 3.5  Latest 10 adop cycles
+EBS_CONTEXT_FILES_LOOKUP_FILE="${TMP_DIR}/ebs_context_files.lookup"                     # 3.6  Context files, run file system and database tier, name and path
+EBS_CONTEXT_VARS_LOOKUP_FILE="${TMP_DIR}/ebs_context_vars.lookup"                       # 3.7  All oa_var parameters of $CONTEXT_FILE with their value, read in bash
+EBS_VITAL_CONTEXT_LOOKUP_FILE="${TMP_DIR}/ebs_vital_context.lookup"                     # 3.7  Context parameters from CONTEXT_PARAMETERS_FILE with expected value, built in bash
+EBS_MANAGERS_LOOKUP_FILE="${TMP_DIR}/ebs_managers.lookup"                               # 3.8  Concurrent managers, processes, cache size, sleep time and log file
+EBS_WORKFLOW_LOOKUP_FILE="${TMP_DIR}/ebs_workflow.lookup"                               # 3.9  Workflow mailer and agent listeners, with their container (service manager)
+
+#|
+#| END LOOKUP FILES
+#|
