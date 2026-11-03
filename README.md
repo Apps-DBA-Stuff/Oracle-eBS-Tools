@@ -6,7 +6,7 @@ When I start working with a new EBS system, I almost always want to gather basic
 
 Oracle already provides tools for this, such as the AD Configuration script (`adutconf.sql`) and many more. These can be used for troubleshooting or simply to document the status of an installation. For a first look and overview, though, I seldom need Oracle's comprehensive scripts and wanted something more lightweight.
 
-EBS Instance Snapshot is the lightweight alternative I created for that first look. AI was used for debugging, for creating the HTML report part, and for cleaning up the scripts (finding duplication and suggesting a better code structure).
+EBS Instance Snapshot is the lightweight alternative I created for that first look. AI was used for debugging, for creating the HTML report part, and for cleaning up the scripts (finding duplication and suggesting a better code structure). This lightweight alternative has been built on OEL 8 and only tested on that linux version.
 
 - Collects what I consider the essential startup information, nothing more.
 - Short, readable output as an HTML report.
@@ -14,30 +14,15 @@ EBS Instance Snapshot is the lightweight alternative I created for that first lo
 
 It is not meant to replace Oracle's tools, but to give a quick and consistent starting point every time I begin working on a new system.
 
-## What the report contains
-
-- <section 1, e.g. EBS release and patch level>
-- <section 2, e.g. installed products and languages>
-- <section 3, e.g. nodes and services>
-- <section 4, e.g. database version and init parameters>
-- <section 5, e.g. selected profile options and context file parameters>
-
-## Requirements
-
-- Oracle Linux 8 (only tested on OL8)
-- Oracle E-Business Suite <12.1 / 12.2>
-- APPS access to the database
 
 ## Files
 
-```
-create_instance_snapshot.sh   The main shell script
-inc_functions                 Functions that collect all needed information
-variables                     Variables used by the scripts
-run_sql.sql                   All SQL for the database and EBS sections
-parameters.lst                Init parameters, profile options and context file
-                              parameters to check. Add or remove entries as needed.
-```
+create_instance_snapshot.sh   # The main shell script
+inc_functions                 # Functions that collect all needed information
+variables                     # Variables used by the scripts
+run_sql.sql                   # All SQL for the database and EBS sections
+parameters.lst                # Init parameters, profile options and context file parameters to check. Add or remove entries as needed.
+
 
 ## Installation
 
